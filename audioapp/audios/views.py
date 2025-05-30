@@ -5,6 +5,7 @@ import io
 import tempfile
 import os
 import time
+import mimetypes
 
 # Supported audio formats and their corresponding ffmpeg format names
 SUPPORTED_FORMATS = {
@@ -29,6 +30,21 @@ def trim_audio(request):
             audio_file = request.FILES.get('audio')
             print(f"Received audio file: {audio_file.name if audio_file else 'None'}")
             
+            if not audio_file:
+                print("Error: No audio file provided")
+                return JsonResponse({'error': 'No audio file provided'}, status=400)
+
+            # Get file extension and validate format
+            file_ext = audio_file.name.split('.')[-1].lower()
+            print(f"File extension: {file_ext}")
+            
+            # Check if the file extension is supported
+            if file_ext not in SUPPORTED_FORMATS:
+                print(f"Error: Unsupported format {file_ext}")
+                return JsonResponse({
+                    'error': f'Unsupported audio format. Supported formats are: {", ".join(SUPPORTED_FORMATS.keys())}'
+                }, status=400)
+
             # Get time parameters in milliseconds and convert to seconds
             start_time_ms = float(request.POST.get('start_time', 0))
             end_time_ms = float(request.POST.get('end_time', 0))
@@ -39,23 +55,10 @@ def trim_audio(request):
             end_time = end_time_ms / 1000
             print(f"Converted time parameters - Start: {start_time}s, End: {end_time}s")
 
-            if not audio_file:
-                print("Error: No audio file provided")
-                return JsonResponse({'error': 'No audio file provided'}, status=400)
-
             # Validate time parameters
             if start_time < 0 or end_time <= start_time:
                 print(f"Error: Invalid time parameters - Start: {start_time}s, End: {end_time}s")
                 return JsonResponse({'error': 'Invalid time parameters'}, status=400)
-
-            # Get file extension and validate format
-            file_ext = audio_file.name.split('.')[-1].lower()
-            print(f"File extension: {file_ext}")
-            if file_ext not in SUPPORTED_FORMATS:
-                print(f"Error: Unsupported format {file_ext}")
-                return JsonResponse({
-                    'error': f'Unsupported audio format. Supported formats are: {", ".join(SUPPORTED_FORMATS.keys())}'
-                }, status=400)
 
             # Read the audio file into memory
             audio_bytes = audio_file.read()
@@ -71,10 +74,16 @@ def trim_audio(request):
                     temp_input.flush()
                     print(f"Created temporary input file: {temp_input.name}")
                     
-                    # Get audio duration using ffprobe
-                    probe = ffmpeg.probe(temp_input.name)
-                    duration = float(probe['format']['duration'])
-                    print(f"Original audio duration: {duration} seconds")
+                    try:
+                        # Get audio duration using ffprobe
+                        probe = ffmpeg.probe(temp_input.name)
+                        duration = float(probe['format']['duration'])
+                        print(f"Original audio duration: {duration} seconds")
+                    except ffmpeg.Error as e:
+                        print(f"Error probing file: {str(e)}")
+                        return JsonResponse({
+                            'error': 'Invalid audio file format or corrupted file'
+                        }, status=400)
                     
                     # Validate audio duration
                     if duration > MAX_DURATION:
@@ -91,23 +100,30 @@ def trim_audio(request):
                     # Create a temporary file for output
                     with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as temp_output:
                         print(f"Created temporary output file: {temp_output.name}")
-                        # Use ffmpeg to trim and convert the audio
-                        stream = ffmpeg.input(temp_input.name, format=SUPPORTED_FORMATS[file_ext])
-                        stream = ffmpeg.output(stream, temp_output.name,
-                                             ss=start_time,
-                                             t=end_time-start_time,
-                                             acodec='libmp3lame',
-                                             vn=None)  # Disable video stream
-                        
-                        print("Running ffmpeg command...")
-                        # Run the ffmpeg command
-                        ffmpeg.run(stream, overwrite_output=True)
-                        
-                        # Read the output file
-                        temp_output.seek(0)
-                        output_stream.write(temp_output.read())
-                        output_stream.seek(0)
-                        print(f"Output file size: {output_stream.getbuffer().nbytes} bytes")
+                        try:
+                            # Use ffmpeg to trim and convert the audio
+                            stream = ffmpeg.input(temp_input.name)
+                            stream = ffmpeg.output(stream, temp_output.name,
+                                                 ss=start_time,
+                                                 t=end_time-start_time,
+                                                 acodec='libmp3lame',
+                                                 vn=None)  # Disable video stream
+                            
+                            print("Running ffmpeg command...")
+                            # Run the ffmpeg command
+                            ffmpeg.run(stream, overwrite_output=True)
+                            
+                            # Read the output file
+                            temp_output.seek(0)
+                            output_stream.write(temp_output.read())
+                            output_stream.seek(0)
+                            print(f"Output file size: {output_stream.getbuffer().nbytes} bytes")
+                        except ffmpeg.Error as e:
+                            print(f"FFmpeg error: {str(e)}")
+                            return JsonResponse({
+                                'error': 'Error processing audio file',
+                                'details': str(e)
+                            }, status=500)
 
                 # Clean up temporary files
                 os.unlink(temp_input.name)
@@ -130,11 +146,11 @@ def trim_audio(request):
                 print("=== Request completed successfully ===\n")
                 return response
 
-            except ffmpeg.Error as ffmpeg_err:
-                print(f"FFmpeg error: {ffmpeg_err.stderr.decode('utf-8') if ffmpeg_err.stderr else 'No stderr output'}")
+            except Exception as e:
+                print(f"Error processing file: {str(e)}")
                 return JsonResponse({
-                    'error': 'ffmpeg error',
-                    'stderr': ffmpeg_err.stderr.decode('utf-8') if ffmpeg_err.stderr else 'No stderr output'
+                    'error': 'Error processing audio file',
+                    'details': str(e)
                 }, status=500)
 
         except Exception as e:
