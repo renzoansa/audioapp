@@ -1,0 +1,5 @@
+django
+djangorestframework
+environs
+djangorestframework-simplejwt
+ffmpeg-python
